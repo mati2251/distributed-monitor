@@ -8,39 +8,39 @@ import (
 )
 
 type ReaderWriterData struct {
-	n   int
-	c   int
-	ar  int
-	aw  int
-	buf []int
+	N   int
+	C   int
+	Ar  int
+	Aw  int
+	Buf []int
 }
 
-func writer(c *rem.Cond, rw *ReaderWriterData) error {
-	for rw.n != 0 {
-		c.Wait()
+func writer(m *rem.Monitor[*ReaderWriterData]) error {
+	for m.Data.N != 0 {
+		m.Wait()
 	}
-	rw.n = rw.n + rw.aw
+	m.Data.N = m.Data.N + m.Data.Aw
 	for range 5 {
-		rw.buf = append(rw.buf, rw.c)
-		rw.c++
-		fmt.Println("Writer, value:", rw.buf[len(rw.buf)-1])
+		m.Data.Buf = append(m.Data.Buf, m.Data.C)
+		m.Data.C++
+		fmt.Println("Writer, value:", m.Data.Buf[len(m.Data.Buf)-1])
 	}
 	time.Sleep(100 * time.Millisecond)
-	rw.n = rw.n - rw.aw
-	c.SignalAll()
+	m.Data.N = m.Data.N - m.Data.Aw
+	m.SignalAll()
 	return nil
 }
 
-func reader(c *rem.Cond, rw *ReaderWriterData) error {
-	for rw.n&rw.aw == rw.aw || len(rw.buf) == 0 {
-		c.Wait()
+func reader(m *rem.Monitor[*ReaderWriterData]) error {
+	for m.Data.N&m.Data.Aw == m.Data.Aw || len(m.Data.Buf) == 0 {
+		m.Wait()
 	}
-	rw.n = rw.n + rw.ar
-	fmt.Println("Reader, value:", rw.buf[0])
-	rw.buf = rw.buf[1:]
+	m.Data.N = m.Data.N + m.Data.Ar
+	fmt.Println("Reader, value:", m.Data.Buf[0])
+	m.Data.Buf = m.Data.Buf[1:]
 	time.Sleep(100 * time.Millisecond)
-	rw.n = rw.n - rw.ar
-	c.SignalAll()
+	m.Data.N = m.Data.N - m.Data.Ar
+	m.SignalAll()
 	return nil
 }
 
@@ -58,12 +58,13 @@ func (rw *ReaderWriter) Writer() {
 
 func NewReaderWriter() (*ReaderWriter, error) {
 	monitor, err := rem.NewMonitor(&ReaderWriterData{
-		n:   0,
-		c:   0,
-		ar:  2,
-		aw:  1,
-		buf: make([]int, 0),
-	})
+		N:   0,
+		C:   0,
+		Ar:  2,
+		Aw:  1,
+		Buf: make([]int, 0),
+	}, "config.json")
+	monitor.Run()
 	if err != nil {
 		fmt.Printf("failed to create monitor: %s\n", err.Error())
 		return nil, err
@@ -75,19 +76,14 @@ func NewReaderWriter() (*ReaderWriter, error) {
 }
 
 func main() {
+	time.Sleep(2 * time.Second)
 	rw, err := NewReaderWriter()
 	if err != nil {
 		fmt.Printf("failed to create ReaderWriter: %s\n", err.Error())
 		return
 	}
 
-	for range 25 {
-		go rw.Reader()
-	}
-
-	for range 5 {
-		go rw.Writer()
-	}
+	go rw.Writer()
 
 	time.Sleep(10 * time.Second)
 }

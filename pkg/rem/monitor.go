@@ -1,95 +1,117 @@
 package rem
 
 import (
-	"encoding/json"
 	"fmt"
-	"io"
-	"os"
 	"sync"
-	// zmq "github.com/pebbe/zmq4"
+	"time"
+
+	zmq "github.com/pebbe/zmq4"
 )
 
-type PeerConfig struct {
-	Id   int    `json:"id"`
-	Host string `json:"host"`
-}
-
-type Config struct {
-	Self  int          `json:"self"`
-	Token int          `json:"token"`
-	Peers []PeerConfig `json:"peers"`
-}
-
-func ReadConfig(path string) (*Config, error) {
-	file, err := os.Open(path)
+func NewMonitor[T any](val T, configPath string) (*Monitor[T], error) {
+	config, err := ReadConfig(configPath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to open config file: %w", err)
+		return nil, fmt.Errorf("failed to read config: %w", err)
 	}
-	defer file.Close()
-	content, err := io.ReadAll(file)
+	zctx, err := zmq.NewContext()
 	if err != nil {
-		return nil, fmt.Errorf("failed to read config file: %w", err)
+		return nil, fmt.Errorf("failed to create zmq context: %w", err)
 	}
-	content = []byte(os.ExpandEnv(string(content)))
-	var config Config
-	if err := json.Unmarshal(content, &config); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal config: %w", err)
+
+	sub, err := zctx.NewSocket(zmq.SUB)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create subscriber socket: %w", err)
 	}
-	return &config, nil
-}
-
-type Context struct {
-	config Config
-}
-
-type Cond struct {
-	cond *sync.Cond
-}
-
-func NewCond() (*Cond, error) {
-	c := &Cond{
-		cond: sync.NewCond(&sync.Mutex{}),
+	selfHost := ""
+	for _, peer := range config.Peers {
+		if peer.Id == config.Self {
+			selfHost = peer.Host
+			continue
+		}
+		err = sub.Connect(peer.Host)
+		if err != nil {
+			return nil, fmt.Errorf("failed to connect zmq subscriber socket to peer %s: %w", peer.Host, err)
+		}
 	}
-	return c, nil
-}
+	err = sub.SetSubscribe(fmt.Sprintf("%d", config.Self))
+	if err != nil {
+		return nil, fmt.Errorf("failed to set zmq subscription for self: %w", err)
+	}
+	err = sub.SetSubscribe("0")
+	if err != nil {
+		return nil, fmt.Errorf("failed to set zmq subscription for broadcast: %w", err)
+	}
+	pub, err := zctx.NewSocket(zmq.PUB)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create zmq publisher socket: %w", err)
+	}
+	err = pub.Bind(selfHost)
+	if err != nil {
+		return nil, fmt.Errorf("failed to bind zmq publisher socket: %w", err)
+	}
+	time.Sleep(100 * time.Millisecond)
 
-func (c *Cond) lock() {
-	c.cond.L.Lock()
-}
+	hasToken := false
+	if config.Self == config.Token {
+		hasToken = true
+	}
 
-func (c *Cond) unlock() {
-	c.cond.L.Unlock()
-}
+	rn := make(map[int]int)
+	lp := make(map[int]int)
+	for _, peer := range config.Peers {
+		rn[peer.Id] = 0
+		lp[peer.Id] = 0
+	}
 
-func (c *Cond) Wait() {
-	c.cond.Wait()
-}
+	mutex := sync.Mutex{}
+	cond := sync.NewCond(&mutex)
 
-func (c *Cond) SignalAll() {
-	c.cond.Broadcast()
-}
-
-func (c *Cond) Signal() {
-	c.cond.Signal()
-}
-
-type Monitor[T any] struct {
-	c   *Cond
-	val T
-}
-
-func NewMonitor[T any](val T) (*Monitor[T], error) {
 	m := &Monitor[T]{
-		c:   &Cond{cond: sync.NewCond(&sync.Mutex{})},
-		val: val,
+		cond:      cond,
+		mutex:     &mutex,
+		Data:      val,
+		rn:        rn,
+		timestamp: 0,
+		sub:       sub,
+		pub:       pub,
+		zctx:      zctx,
+		config:    *config,
+		hasToken:  hasToken,
+		locked:    false,
+		token: Token{
+			Lp: lp,
+			Q:  make([]int, 0),
+		},
 	}
 	return m, nil
 }
 
-type SynchronizedFunc[T any] func(m *Cond, val T) error
+func (m *Monitor[T]) Signal() {
+	m.cond.Signal()
+}
 
-func (m Monitor[T]) Synchronized(f SynchronizedFunc[T]) error {
-	m.c.lock()
-	defer m.c.unlock()
-	return f(m.c, m.val)
+func (m *Monitor[T]) lock() {
+	m.cond.L.Lock()
+	defer m.cond.L.Unlock()
+	fmt.Printf("Monitor locked by %d at timestamp %d\n", m.config.Self, m.timestamp)
+}
+
+func (m *Monitor[T]) unlock() {
+	m.cond.L.Lock()
+	defer m.cond.L.Unlock()
+	fmt.Printf("Monitor unlocked by %d at timestamp %d\n", m.config.Self, m.timestamp)
+}
+
+func (m *Monitor[T]) Wait() {
+	m.cond.Wait()
+}
+
+func (m *Monitor[T]) SignalAll() {
+	m.cond.Broadcast()
+}
+
+func (m *Monitor[T]) Synchronized(f SynchronizedFunc[T]) error {
+	m.lock()
+	defer m.unlock()
+	return f(m)
 }

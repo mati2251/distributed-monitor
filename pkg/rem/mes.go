@@ -5,6 +5,8 @@ import (
 	"encoding/gob"
 	"fmt"
 	"os"
+	"slices"
+	"strconv"
 )
 
 func (m *Monitor[T]) Run() {
@@ -13,19 +15,22 @@ func (m *Monitor[T]) Run() {
 		gob.Register(Request{})
 		gob.Register(m.Data)
 		for {
-			fmt.Printf("Waiting for message...\n")
 			msg, err := m.sub.RecvMessage(0)
+			// fmt.Println("Received message:", msg)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error receiving message: %v\n", err)
 				continue
 			}
-			fmt.Printf("Received message %s\n", msg)
 			if len(msg) > 1 {
 				m.cond.L.Lock()
-				if msg[0] != BRODCAST {
-					m.handleToken(msg[1])
-				} else {
+				if msg[0] == BRODCAST {
 					m.handleRequest(msg[1])
+				} else if msg[0] == SIGNAL {
+					m.handleSignal(msg[1])
+				} else if msg[0] == WAIT {
+					m.handleWait(msg[1])
+				} else {
+					m.handleToken(msg[1])
 				}
 				m.cond.L.Unlock()
 			}
@@ -42,7 +47,14 @@ func (m *Monitor[T]) handleRequest(msgParts string) {
 		fmt.Fprintf(os.Stderr, "Error decoding request: %v\n", err)
 		return
 	}
-	fmt.Printf("Handling request with ID %d and timestamp %d\n", request.Id, request.Timestamp)
+
+	m.rn[request.Id] = max(m.rn[request.Id], request.Timestamp)
+	if m.hasToken && m.config.Self != request.Id {
+		if m.token.Lp[request.Id]+1 == m.rn[request.Id] && !m.locked {
+			m.token.Q = append(m.token.Q, request.Id)
+			m.sendToken()
+		}
+	}
 }
 
 func (m *Monitor[T]) handleToken(msg string) {
@@ -50,25 +62,29 @@ func (m *Monitor[T]) handleToken(msg string) {
 	decoder := gob.NewDecoder(bytes.NewBufferString(msg))
 	err := decoder.Decode(&tokenRequest)
 	if err != nil {
+		fmt.Fprintf(os.Stderr, "%s\n", msg)
 		fmt.Fprintf(os.Stderr, "Error decoding token request: %v\n", err)
 		return
 	}
-	fmt.Printf("Handling token request with token %v and data %v\n", tokenRequest.Token, tokenRequest.Data)
+	m.token = tokenRequest.Token
+	m.Data = tokenRequest.Data
+	m.hasToken = true
+	m.cond.Signal()
 }
 
 func (m *Monitor[T]) sendToken() {
+	if len(m.token.Q) == 0 {
+		return
+	}
+
+	m.hasToken = false
+	id := m.token.Q[0]
+	m.token.Q = m.token.Q[1:]
+
 	tokenRequest := TokenRequest[T]{
 		Token: m.token,
 		Data:  m.Data,
 	}
-
-	if len(m.token.Q) == 0 {
-		// TODO fix
-		m.token.Q = append(m.token.Q, 2)
-	}
-
-	id := m.token.Q[0]
-	m.token.Q = m.token.Q[1:]
 
 	var buf bytes.Buffer
 	encoder := gob.NewEncoder(&buf)
@@ -84,11 +100,9 @@ func (m *Monitor[T]) sendToken() {
 }
 
 func (m *Monitor[T]) sendRequest() {
-	m.timestamp++
-
 	request := Request{
 		Id:        m.config.Self,
-		Timestamp: m.timestamp,
+		Timestamp: m.rn[m.config.Self],
 	}
 	var buf bytes.Buffer
 	encoder := gob.NewEncoder(&buf)
@@ -101,5 +115,60 @@ func (m *Monitor[T]) sendRequest() {
 		fmt.Printf("Error sending request: %v\n", err)
 		return
 	}
-	fmt.Printf("Sent request with ID %d and timestamp %d\n", request.Id, request.Timestamp)
+}
+
+func (m *Monitor[T]) handleWait(msg string) {
+	id, err := strconv.Atoi(msg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error converting message to ID: %v\n", err)
+		return
+	}
+	m.waiting = append(m.waiting, id)
+}
+
+func (m *Monitor[T]) sendWait() {
+	if _, err := m.pub.SendMessage(WAIT, strconv.Itoa(m.config.Self), 0); err != nil {
+		fmt.Printf("Error sending wait signal: %v\n", err)
+		return
+	}
+}
+
+func (m *Monitor[T]) handleSignal(msg string) {
+	id, err := strconv.Atoi(msg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error converting message to ID: %v\n", err)
+		return
+	}
+
+	for i, waitingId := range m.waiting {
+		if waitingId == id {
+			m.waiting = slices.Delete(m.waiting, i, i+1)
+			break
+		}
+	}
+	if id == m.config.Self && m.wait {
+		go func() {
+			m.cond.L.Lock()
+			m.wait = false
+			m.plock()
+			m.cond.Signal()
+			m.cond.L.Unlock()
+		}()
+	}
+}
+
+func (m *Monitor[T]) sendSignal(all bool) {
+	if len(m.waiting) == 0 {
+		return
+	}
+	ids := m.waiting[0:1]
+	if !all {
+		ids = m.waiting
+	}
+	for _, id := range ids {
+		if _, err := m.pub.SendMessage(SIGNAL, strconv.Itoa(id), 0); err != nil {
+			fmt.Printf("Error sending signal: %v\n", err)
+			return
+		}
+	}
 }

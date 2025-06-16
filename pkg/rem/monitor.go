@@ -2,6 +2,7 @@ package rem
 
 import (
 	"fmt"
+	"slices"
 	"sync"
 	"time"
 
@@ -41,6 +42,14 @@ func NewMonitor[T any](val T, configPath string) (*Monitor[T], error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to set zmq subscription for broadcast: %w", err)
 	}
+	err = sub.SetSubscribe("S")
+	if err != nil {
+		return nil, fmt.Errorf("failed to set zmq subscription for broadcast: %w", err)
+	}
+	err = sub.SetSubscribe("W")
+	if err != nil {
+		return nil, fmt.Errorf("failed to set zmq subscription for broadcast: %w", err)
+	}
 	pub, err := zctx.NewSocket(zmq.PUB)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create zmq publisher socket: %w", err)
@@ -71,43 +80,73 @@ func NewMonitor[T any](val T, configPath string) (*Monitor[T], error) {
 		mutex:     &mutex,
 		Data:      val,
 		rn:        rn,
-		timestamp: 0,
 		sub:       sub,
 		pub:       pub,
 		zctx:      zctx,
 		config:    *config,
 		hasToken:  hasToken,
 		locked:    false,
+		wait:      false,
 		token: Token{
 			Lp: lp,
 			Q:  make([]int, 0),
 		},
+		waiting: make([]int, 0),
 	}
 	return m, nil
 }
 
 func (m *Monitor[T]) Signal() {
-	m.cond.Signal()
+	m.sendSignal(false)
 }
 
 func (m *Monitor[T]) lock() {
 	m.cond.L.Lock()
 	defer m.cond.L.Unlock()
-	fmt.Printf("Monitor locked by %d at timestamp %d\n", m.config.Self, m.timestamp)
+	m.plock()
+}
+
+func (m *Monitor[T]) plock(){
+	m.rn[m.config.Self]++
+	if !m.hasToken {
+		m.sendRequest()
+		m.cond.Wait()
+	}
+	m.locked = true
+	fmt.Println("Locking monitor")
 }
 
 func (m *Monitor[T]) unlock() {
 	m.cond.L.Lock()
 	defer m.cond.L.Unlock()
-	fmt.Printf("Monitor unlocked by %d at timestamp %d\n", m.config.Self, m.timestamp)
+	m.punlock()
+	fmt.Println("Unlocking monitor")
+}
+
+func (m *Monitor[T]) punlock() {
+	m.token.Lp[m.config.Self] = m.rn[m.config.Self]
+	for id, lp := range m.token.Lp {
+		if lp + 1 == m.rn[id] && !slices.Contains(m.token.Q, id) && id != m.config.Self {
+			m.token.Q = append(m.token.Q, id)
+		}
+	}
+	m.sendToken()
+	m.locked = false
 }
 
 func (m *Monitor[T]) Wait() {
+	m.cond.L.Lock()
+	defer m.cond.L.Unlock()
+	m.wait = true
+	m.sendWait()
+	m.punlock()
+	// fmt.Println("Waiting for signal")
 	m.cond.Wait()
 }
 
 func (m *Monitor[T]) SignalAll() {
-	m.cond.Broadcast()
+	// fmt.Println("Sending signal to all peers")
+	m.sendSignal(true)
 }
 
 func (m *Monitor[T]) Synchronized(f SynchronizedFunc[T]) error {

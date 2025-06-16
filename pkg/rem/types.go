@@ -8,6 +8,8 @@ import (
 
 const (
 	BRODCAST = "0"
+	SIGNAL   = "S"
+	WAIT     = "W"
 )
 
 type PeerConfig struct {
@@ -31,7 +33,6 @@ type Monitor[T any] struct {
 	cond      *sync.Cond
 	mutex     *sync.Mutex
 	rn        map[int]int
-	timestamp int
 	hasToken  bool
 	sub       *zmq.Socket
 	pub       *zmq.Socket
@@ -39,6 +40,8 @@ type Monitor[T any] struct {
 	config    Config
 	token     Token
 	locked    bool
+	waiting   []int
+	wait      bool
 }
 
 type TokenRequest[T any] struct {

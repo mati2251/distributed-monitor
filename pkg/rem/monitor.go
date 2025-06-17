@@ -76,17 +76,17 @@ func NewMonitor[T any](val T, configPath string) (*Monitor[T], error) {
 	cond := sync.NewCond(&mutex)
 
 	m := &Monitor[T]{
-		cond:      cond,
-		mutex:     &mutex,
-		Data:      val,
-		rn:        rn,
-		sub:       sub,
-		pub:       pub,
-		zctx:      zctx,
-		config:    *config,
-		hasToken:  hasToken,
-		locked:    false,
-		wait:      false,
+		cond:     cond,
+		mutex:    &mutex,
+		Data:     val,
+		rn:       rn,
+		sub:      sub,
+		pub:      pub,
+		zctx:     zctx,
+		config:   *config,
+		hasToken: hasToken,
+		locked:   false,
+		wait:     false,
 		token: Token{
 			Lp: lp,
 			Q:  make([]int, 0),
@@ -106,27 +106,25 @@ func (m *Monitor[T]) lock() {
 	m.plock()
 }
 
-func (m *Monitor[T]) plock(){
+func (m *Monitor[T]) plock() {
 	m.rn[m.config.Self]++
 	if !m.hasToken {
 		m.sendRequest()
 		m.cond.Wait()
 	}
 	m.locked = true
-	fmt.Println("Locking monitor")
 }
 
 func (m *Monitor[T]) unlock() {
 	m.cond.L.Lock()
 	defer m.cond.L.Unlock()
 	m.punlock()
-	fmt.Println("Unlocking monitor")
 }
 
 func (m *Monitor[T]) punlock() {
 	m.token.Lp[m.config.Self] = m.rn[m.config.Self]
 	for id, lp := range m.token.Lp {
-		if lp + 1 == m.rn[id] && !slices.Contains(m.token.Q, id) && id != m.config.Self {
+		if lp < m.rn[id] && !slices.Contains(m.token.Q, id) && id != m.config.Self {
 			m.token.Q = append(m.token.Q, id)
 		}
 	}
@@ -140,12 +138,10 @@ func (m *Monitor[T]) Wait() {
 	m.wait = true
 	m.sendWait()
 	m.punlock()
-	// fmt.Println("Waiting for signal")
 	m.cond.Wait()
 }
 
 func (m *Monitor[T]) SignalAll() {
-	// fmt.Println("Sending signal to all peers")
 	m.sendSignal(true)
 }
 

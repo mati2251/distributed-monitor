@@ -16,7 +16,6 @@ func (m *Monitor[T]) Run() {
 		gob.Register(m.Data)
 		for {
 			msg, err := m.sub.RecvMessage(0)
-			// fmt.Println("Received message:", msg)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error receiving message: %v\n", err)
 				continue
@@ -50,7 +49,7 @@ func (m *Monitor[T]) handleRequest(msgParts string) {
 
 	m.rn[request.Id] = max(m.rn[request.Id], request.Timestamp)
 	if m.hasToken && m.config.Self != request.Id {
-		if m.token.Lp[request.Id]+1 == m.rn[request.Id] && !m.locked {
+		if m.token.Lp[request.Id] < m.rn[request.Id] && !m.locked {
 			m.token.Q = append(m.token.Q, request.Id)
 			m.sendToken()
 		}
@@ -123,7 +122,9 @@ func (m *Monitor[T]) handleWait(msg string) {
 		fmt.Fprintf(os.Stderr, "Error converting message to ID: %v\n", err)
 		return
 	}
-	m.waiting = append(m.waiting, id)
+	if !slices.Contains(m.waiting, id) {
+		m.waiting = append(m.waiting, id)
+	}
 }
 
 func (m *Monitor[T]) sendWait() {
@@ -162,7 +163,7 @@ func (m *Monitor[T]) sendSignal(all bool) {
 		return
 	}
 	ids := m.waiting[0:1]
-	if !all {
+	if all {
 		ids = m.waiting
 	}
 	for _, id := range ids {
